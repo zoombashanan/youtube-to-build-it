@@ -39,6 +39,54 @@ async function getYt(): Promise<Innertube> {
   return _yt;
 }
 
+type CaptionTrack = {
+  base_url: string;
+  language_code?: string;
+  kind?: string;
+  name?: { text?: string };
+};
+
+type Json3Seg = { utf8?: string };
+type Json3Event = { segs?: Json3Seg[] };
+type Json3Response = { events?: Json3Event[] };
+
+function pickBestTrack(tracks: CaptionTrack[]): CaptionTrack | null {
+  if (tracks.length === 0) return null;
+  // Prefer manual English, then auto English, then any.
+  const enManual = tracks.find(
+    (t) => t.language_code === "en" && t.kind !== "asr"
+  );
+  if (enManual) return enManual;
+  const en = tracks.find((t) => t.language_code === "en");
+  if (en) return en;
+  return tracks[0];
+}
+
+async function fetchJson3Captions(baseUrl: string): Promise<string[]> {
+  const url = baseUrl.includes("fmt=") ? baseUrl : baseUrl + "&fmt=json3";
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    },
+  });
+  if (!res.ok) {
+    throw new Error(`caption fetch HTTP ${res.status}`);
+  }
+  const data = (await res.json()) as Json3Response;
+  const out: string[] = [];
+  for (const ev of data.events ?? []) {
+    if (!ev.segs) continue;
+    let line = "";
+    for (const s of ev.segs) {
+      if (typeof s.utf8 === "string") line += s.utf8;
+    }
+    line = line.replace(/\n/g, " ").trim();
+    if (line.length > 0) out.push(line);
+  }
+  return out;
+}
+
 export async function fetchAndCleanTranscript(
   url: string
 ): Promise<TranscriptResult> {
@@ -50,29 +98,27 @@ export async function fetchAndCleanTranscript(
   const info = await yt.getInfo(videoId);
   const title = info.basic_info.title ?? `YouTube video ${videoId}`;
 
-  let transcriptData;
+  const tracks = (info.captions?.caption_tracks ?? []) as CaptionTrack[];
+  const track = pickBestTrack(tracks);
+  if (!track || !track.base_url) {
+    console.error(
+      "[youtube] no caption tracks for",
+      videoId,
+      "captions object present:",
+      Boolean(info.captions)
+    );
+    throw new Error("NO_TRANSCRIPT");
+  }
+
+  let rawTexts: string[];
   try {
-    transcriptData = await info.getTranscript();
-  } catch {
+    rawTexts = await fetchJson3Captions(track.base_url);
+  } catch (e) {
+    console.error(
+      "[youtube] caption-track fetch failed:",
+      e instanceof Error ? e.message : String(e)
+    );
     throw new Error("NO_TRANSCRIPT");
-  }
-
-  const segments =
-    transcriptData?.transcript?.content?.body?.initial_segments ?? [];
-
-  if (segments.length === 0) {
-    throw new Error("NO_TRANSCRIPT");
-  }
-
-  // Extract plain text from each segment.
-  const rawTexts: string[] = [];
-  for (const seg of segments) {
-    // Each segment has snippet.text or snippet.runs[].text
-    const snippet = (seg as { snippet?: { text?: string } }).snippet;
-    const text = snippet?.text;
-    if (typeof text === "string" && text.trim().length > 0) {
-      rawTexts.push(text.trim());
-    }
   }
 
   if (rawTexts.length === 0) {
