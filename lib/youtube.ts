@@ -29,6 +29,19 @@ export type TranscriptResult = {
   text: string;
   estimatedMinutes: number;
   title: string;
+  debug?: TranscriptDebug;
+};
+
+export type TranscriptDebug = {
+  videoId: string;
+  triedClients: { client: string; ok: boolean; trackCount: number; error?: string }[];
+  selectedClient?: string;
+  trackLanguage?: string;
+  trackKind?: string;
+  fetchHttp?: number;
+  fetchBytes?: number;
+  rawSegmentCount?: number;
+  finalWordCount?: number;
 };
 
 let _yt: Innertube | null = null;
@@ -50,9 +63,13 @@ type Json3Seg = { utf8?: string };
 type Json3Event = { segs?: Json3Seg[] };
 type Json3Response = { events?: Json3Event[] };
 
+// Innertube clients to try in order. iOS/Android/TV are known to return
+// caption track data even when WEB client gets stripped on datacenter IPs.
+const CLIENT_PRIORITY = ["IOS", "ANDROID", "TV", "MWEB", "WEB"] as const;
+type ClientName = (typeof CLIENT_PRIORITY)[number];
+
 function pickBestTrack(tracks: CaptionTrack[]): CaptionTrack | null {
   if (tracks.length === 0) return null;
-  // Prefer manual English, then auto English, then any.
   const enManual = tracks.find(
     (t) => t.language_code === "en" && t.kind !== "asr"
   );
@@ -62,18 +79,23 @@ function pickBestTrack(tracks: CaptionTrack[]): CaptionTrack | null {
   return tracks[0];
 }
 
-async function fetchJson3Captions(baseUrl: string): Promise<string[]> {
+async function fetchJson3Captions(
+  baseUrl: string
+): Promise<{ texts: string[]; status: number; bytes: number }> {
   const url = baseUrl.includes("fmt=") ? baseUrl : baseUrl + "&fmt=json3";
   const res = await fetch(url, {
     headers: {
       "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
     },
   });
+  const status = res.status;
   if (!res.ok) {
-    throw new Error(`caption fetch HTTP ${res.status}`);
+    return { texts: [], status, bytes: 0 };
   }
-  const data = (await res.json()) as Json3Response;
+  const buf = await res.arrayBuffer();
+  const bytes = buf.byteLength;
+  const data = JSON.parse(new TextDecoder().decode(buf)) as Json3Response;
   const out: string[] = [];
   for (const ev of data.events ?? []) {
     if (!ev.segs) continue;
@@ -84,49 +106,104 @@ async function fetchJson3Captions(baseUrl: string): Promise<string[]> {
     line = line.replace(/\n/g, " ").trim();
     if (line.length > 0) out.push(line);
   }
-  return out;
+  return { texts: out, status, bytes };
+}
+
+async function getInfoWithCaptions(
+  yt: Innertube,
+  videoId: string,
+  debug: TranscriptDebug
+): Promise<{ info: Awaited<ReturnType<Innertube["getInfo"]>>; client: ClientName } | null> {
+  for (const client of CLIENT_PRIORITY) {
+    const attempt: TranscriptDebug["triedClients"][number] = {
+      client,
+      ok: false,
+      trackCount: 0,
+    };
+    try {
+      const info = await yt.getInfo(videoId, { client });
+      const tracks = (info.captions?.caption_tracks ?? []) as CaptionTrack[];
+      attempt.ok = true;
+      attempt.trackCount = tracks.length;
+      debug.triedClients.push(attempt);
+      if (tracks.length > 0) {
+        return { info, client };
+      }
+    } catch (e) {
+      attempt.error = e instanceof Error ? e.message : String(e);
+      debug.triedClients.push(attempt);
+    }
+  }
+  return null;
 }
 
 export async function fetchAndCleanTranscript(
-  url: string
+  url: string,
+  opts: { debug?: boolean } = {}
 ): Promise<TranscriptResult> {
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error("INVALID_URL");
 
+  const debug: TranscriptDebug = { videoId, triedClients: [] };
+
   const yt = await getYt();
+  const result = await getInfoWithCaptions(yt, videoId, debug);
 
-  const info = await yt.getInfo(videoId);
+  if (!result) {
+    console.error(
+      "[youtube] no client returned caption tracks. Tried:",
+      JSON.stringify(debug.triedClients)
+    );
+    const err = new Error("NO_TRANSCRIPT") as Error & { debug?: TranscriptDebug };
+    if (opts.debug) err.debug = debug;
+    throw err;
+  }
+
+  const { info, client } = result;
+  debug.selectedClient = client;
+
   const title = info.basic_info.title ?? `YouTube video ${videoId}`;
-
   const tracks = (info.captions?.caption_tracks ?? []) as CaptionTrack[];
   const track = pickBestTrack(tracks);
   if (!track || !track.base_url) {
-    console.error(
-      "[youtube] no caption tracks for",
-      videoId,
-      "captions object present:",
-      Boolean(info.captions)
-    );
-    throw new Error("NO_TRANSCRIPT");
+    const err = new Error("NO_TRANSCRIPT") as Error & { debug?: TranscriptDebug };
+    if (opts.debug) err.debug = debug;
+    throw err;
   }
+  debug.trackLanguage = track.language_code;
+  debug.trackKind = track.kind;
 
-  let rawTexts: string[];
+  let fetched: { texts: string[]; status: number; bytes: number };
   try {
-    rawTexts = await fetchJson3Captions(track.base_url);
+    fetched = await fetchJson3Captions(track.base_url);
   } catch (e) {
     console.error(
-      "[youtube] caption-track fetch failed:",
+      "[youtube] caption-track fetch threw:",
       e instanceof Error ? e.message : String(e)
     );
-    throw new Error("NO_TRANSCRIPT");
+    const err = new Error("NO_TRANSCRIPT") as Error & { debug?: TranscriptDebug };
+    if (opts.debug) err.debug = debug;
+    throw err;
   }
 
-  if (rawTexts.length === 0) {
-    throw new Error("NO_TRANSCRIPT");
+  debug.fetchHttp = fetched.status;
+  debug.fetchBytes = fetched.bytes;
+  debug.rawSegmentCount = fetched.texts.length;
+
+  if (fetched.texts.length === 0) {
+    console.error(
+      "[youtube] caption fetch returned no segments. status:",
+      fetched.status,
+      "bytes:",
+      fetched.bytes
+    );
+    const err = new Error("NO_TRANSCRIPT") as Error & { debug?: TranscriptDebug };
+    if (opts.debug) err.debug = debug;
+    throw err;
   }
 
   // Decode HTML entities + collapse whitespace.
-  const joined = rawTexts
+  const joined = fetched.texts
     .join(" ")
     .replace(/&amp;/g, "&")
     .replace(/&quot;/g, '"')
@@ -154,12 +231,20 @@ export async function fetchAndCleanTranscript(
 
   const text = deduped.join(" ").trim();
   if (text.length < 50) {
-    throw new Error("NO_TRANSCRIPT");
+    const err = new Error("NO_TRANSCRIPT") as Error & { debug?: TranscriptDebug };
+    if (opts.debug) err.debug = debug;
+    throw err;
   }
 
-  // Estimate video length: ~150 wpm, round to nearest minute.
   const wordCount = text.split(/\s+/).length;
+  debug.finalWordCount = wordCount;
+
   const estimatedMinutes = Math.max(1, Math.round(wordCount / 150));
 
-  return { text, estimatedMinutes, title };
+  return {
+    text,
+    estimatedMinutes,
+    title,
+    debug: opts.debug ? debug : undefined,
+  };
 }

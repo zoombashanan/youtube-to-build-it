@@ -42,6 +42,7 @@ export async function POST(request: Request) {
     );
   }
   const url = parsed.data.url;
+  const debugMode = new URL(request.url).searchParams.get("debug") === "1";
 
   const admin = createAdminClient();
 
@@ -64,15 +65,21 @@ export async function POST(request: Request) {
   }
 
   // 4. Fetch + clean transcript
-  let transcript: { text: string; estimatedMinutes: number; title: string };
+  let transcript: Awaited<ReturnType<typeof fetchAndCleanTranscript>>;
   try {
-    transcript = await fetchAndCleanTranscript(url);
+    transcript = await fetchAndCleanTranscript(url, { debug: debugMode });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "";
+    const debugInfo = debugMode
+      ? (e as Error & { debug?: unknown }).debug
+      : undefined;
     await logEvent(admin, "transcribe_error", user.id);
     if (msg === "NO_TRANSCRIPT") {
       return NextResponse.json(
-        { error: "This video does not have captions. Try another video." },
+        {
+          error: "This video does not have captions. Try another video.",
+          ...(debugInfo ? { _debug: debugInfo } : {}),
+        },
         { status: 422 }
       );
     }
@@ -81,6 +88,7 @@ export async function POST(request: Request) {
       {
         error:
           "Could not fetch the transcript. YouTube may be blocking it. Try another video.",
+        ...(debugInfo ? { _debug: debugInfo } : {}),
       },
       { status: 422 }
     );
