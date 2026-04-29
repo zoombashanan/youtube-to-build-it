@@ -45,14 +45,18 @@ export async function POST(request: Request) {
       });
     }
 
-    if (linkRes.error || !linkRes.data?.properties?.action_link) {
+    const hashedToken = linkRes.data?.properties?.hashed_token;
+    if (linkRes.error || !hashedToken) {
       console.error("[send-link] generateLink failed:", linkRes.error?.message);
       return NextResponse.json({ error: "Could not generate sign-in link." }, { status: 500 });
     }
 
-    const actionLink = linkRes.data.properties.action_link;
+    // Build a link that points DIRECTLY to our callback (skipping Supabase's
+    // auto-consume verify endpoint). This prevents email-scanner prefetch
+    // from burning the one-time token before the user clicks.
+    const customLink = `${appUrl}/api/auth/callback?token_hash=${encodeURIComponent(hashedToken)}&type=magiclink&next=${encodeURIComponent("/dashboard")}`;
 
-    const { error: sendError } = await sendMagicLinkEmail(email, actionLink);
+    const { error: sendError } = await sendMagicLinkEmail(email, customLink);
     if (sendError) {
       console.error("[send-link] Resend send failed:", sendError);
       return NextResponse.json({ error: "Could not send email. Try again." }, { status: 500 });
