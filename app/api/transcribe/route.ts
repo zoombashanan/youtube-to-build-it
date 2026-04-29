@@ -64,7 +64,7 @@ export async function POST(request: Request) {
   }
 
   // 4. Fetch + clean transcript
-  let transcript: { text: string; estimatedMinutes: number };
+  let transcript: { text: string; estimatedMinutes: number; title: string };
   try {
     transcript = await fetchAndCleanTranscript(url);
   } catch (e) {
@@ -88,8 +88,7 @@ export async function POST(request: Request) {
 
   // 5. Generate guide
   const capturedDate = new Date().toISOString().slice(0, 10);
-  // Use the videoId as a stable, non-PII title fallback since we don't fetch metadata.
-  const title = `YouTube video ${videoId}`;
+  const title = transcript.title;
 
   let guideResult;
   try {

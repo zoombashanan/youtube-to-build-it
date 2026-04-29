@@ -1,4 +1,4 @@
-import { YoutubeTranscript } from "youtube-transcript";
+import { Innertube } from "youtubei.js";
 
 export function extractVideoId(url: string): string | null {
   try {
@@ -28,39 +28,79 @@ export function isValidYoutubeUrl(url: string): boolean {
 export type TranscriptResult = {
   text: string;
   estimatedMinutes: number;
+  title: string;
 };
+
+let _yt: Innertube | null = null;
+async function getYt(): Promise<Innertube> {
+  if (!_yt) {
+    _yt = await Innertube.create({ generate_session_locally: true });
+  }
+  return _yt;
+}
 
 export async function fetchAndCleanTranscript(
   url: string
 ): Promise<TranscriptResult> {
-  const segments = await YoutubeTranscript.fetchTranscript(url);
+  const videoId = extractVideoId(url);
+  if (!videoId) throw new Error("INVALID_URL");
 
-  if (!segments || segments.length === 0) {
+  const yt = await getYt();
+
+  const info = await yt.getInfo(videoId);
+  const title = info.basic_info.title ?? `YouTube video ${videoId}`;
+
+  let transcriptData;
+  try {
+    transcriptData = await info.getTranscript();
+  } catch {
     throw new Error("NO_TRANSCRIPT");
   }
 
-  // Decode HTML entities, collapse whitespace, dedupe consecutive duplicate sentences.
-  const decoded = segments
-    .map((s) =>
-      s.text
-        .replace(/&amp;/g, "&")
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&nbsp;/g, " ")
-    )
+  const segments =
+    transcriptData?.transcript?.content?.body?.initial_segments ?? [];
+
+  if (segments.length === 0) {
+    throw new Error("NO_TRANSCRIPT");
+  }
+
+  // Extract plain text from each segment.
+  const rawTexts: string[] = [];
+  for (const seg of segments) {
+    // Each segment has snippet.text or snippet.runs[].text
+    const snippet = (seg as { snippet?: { text?: string } }).snippet;
+    const text = snippet?.text;
+    if (typeof text === "string" && text.trim().length > 0) {
+      rawTexts.push(text.trim());
+    }
+  }
+
+  if (rawTexts.length === 0) {
+    throw new Error("NO_TRANSCRIPT");
+  }
+
+  // Decode HTML entities + collapse whitespace.
+  const joined = rawTexts
     .join(" ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
-  // Dedupe consecutive duplicate sentences (caption auto-gen often repeats lines)
-  const sentences = decoded.split(/(?<=[.!?])\s+/);
+  // Dedupe consecutive duplicate sentences (auto-captions often repeat lines).
+  const sentences = joined.split(/(?<=[.!?])\s+/);
   const deduped: string[] = [];
   for (const s of sentences) {
     const norm = s.trim().toLowerCase();
     if (norm.length === 0) continue;
-    if (deduped.length > 0 && deduped[deduped.length - 1].trim().toLowerCase() === norm) {
+    if (
+      deduped.length > 0 &&
+      deduped[deduped.length - 1].trim().toLowerCase() === norm
+    ) {
       continue;
     }
     deduped.push(s.trim());
@@ -71,9 +111,9 @@ export async function fetchAndCleanTranscript(
     throw new Error("NO_TRANSCRIPT");
   }
 
-  // Estimate video length: ~150 words per minute, round to nearest minute.
+  // Estimate video length: ~150 wpm, round to nearest minute.
   const wordCount = text.split(/\s+/).length;
   const estimatedMinutes = Math.max(1, Math.round(wordCount / 150));
 
-  return { text, estimatedMinutes };
+  return { text, estimatedMinutes, title };
 }
