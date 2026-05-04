@@ -9,18 +9,43 @@ type Props = {
   cap: number;
 };
 
-type Stage = "idle" | "checking" | "transcript" | "guide" | "done";
-
-const STAGE_LABEL: Record<Stage, string> = {
-  idle: "",
-  checking: "Checking video length...",
-  transcript: "Grabbing transcript...",
-  guide: "Building guide...",
-  done: "Done",
-};
-
 const MAX_DURATION_SEC = 3600;
 const MAX_DURATION_LABEL = "60 minutes";
+
+type SetKey = "A" | "B";
+
+const STAGE_SETS: Record<SetKey, readonly [string, string, string, string]> = {
+  A: [
+    "Watching the video so you don't have to...",
+    "Pretending I understood it...",
+    "Making it sound smarter than it was...",
+    "Boom. You're welcome.",
+  ],
+  B: [
+    "Yanking the words out of the video...",
+    "Ignoring the part where they beg for likes...",
+    "Bribing the AI to focus...",
+    "Acting like I came up with it...",
+  ],
+};
+
+const LAST_SET_KEY = "buildit_last_set";
+
+// Spec: on each build, read; if "A" or missing, use Set B and write "B".
+// If "B", use Set A and write "A". localStorage unavailable: default to "A".
+export function pickSet(): SetKey {
+  try {
+    const last = window.localStorage.getItem(LAST_SET_KEY);
+    if (last === "B") {
+      window.localStorage.setItem(LAST_SET_KEY, "A");
+      return "A";
+    }
+    window.localStorage.setItem(LAST_SET_KEY, "B");
+    return "B";
+  } catch {
+    return "A";
+  }
+}
 
 function slug(s: string): string {
   return s
@@ -52,7 +77,8 @@ function formatDuration(sec: number): string {
 export default function DashboardClient({ email, initialUsed, cap }: Props) {
   const [used, setUsed] = useState(initialUsed);
   const [url, setUrl] = useState("");
-  const [stage, setStage] = useState<Stage>("idle");
+  const [progressStage, setProgressStage] = useState<0 | 1 | 2 | 3 | 4>(0);
+  const [setKey, setSetKey] = useState<SetKey>("A");
   const [error, setError] = useState<string | null>(null);
   const [softWarning, setSoftWarning] = useState<string | null>(null);
   const [guide, setGuide] = useState<string | null>(null);
@@ -63,8 +89,7 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
 
   const remaining = Math.max(0, cap - used);
   const atCap = remaining <= 0;
-  const submitting =
-    stage === "checking" || stage === "transcript" || stage === "guide";
+  const building = progressStage > 0;
 
   async function preflightCheck(targetUrl: string): Promise<
     | {
@@ -98,8 +123,6 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
         typeof json.durationSec === "number" ? json.durationSec : null;
 
       if (dur === null) {
-        // Have title/channel but no duration: still pass them through to
-        // skip the inline meta call.
         const m =
           title && channel ? { title, channel, durationSec: null } : undefined;
         return { ok: true, soft: softMsg, meta: m };
@@ -122,28 +145,35 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (atCap || submitting || url.trim().length === 0) return;
+    if (atCap || building || url.trim().length === 0) return;
 
+    const chosen = pickSet();
+    setSetKey(chosen);
     setError(null);
     setSoftWarning(null);
     setGuide(null);
     setMeta(null);
     setPreflightMeta(null);
-    setStage("checking");
+    setProgressStage(1);
 
     const trimmed = url.trim();
 
     const pre = await preflightCheck(trimmed);
     if (!pre.ok) {
-      setStage("idle");
+      setProgressStage(0);
       setError(pre.message);
       return;
     }
     if (pre.soft) setSoftWarning(pre.soft);
     if (pre.meta) setPreflightMeta(pre.meta);
 
-    setStage("transcript");
-    const guideStageTimer = setTimeout(() => setStage("guide"), 1200);
+    setProgressStage(2);
+    // Per spec: 2s on Stage 2, then advance to Stage 3 (Claude phase).
+    const stage3Timer = setTimeout(() => {
+      setProgressStage((s) => (s === 2 ? 3 : s));
+    }, 2000);
+
+    let stage4HideTimer: ReturnType<typeof setTimeout> | undefined;
 
     try {
       const transcribeBody: {
@@ -164,7 +194,7 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(transcribeBody),
       });
-      clearTimeout(guideStageTimer);
+      clearTimeout(stage3Timer);
 
       const json = await res.json().catch(() => ({}));
 
@@ -184,10 +214,13 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
       } else {
         setUsed((u) => u + 1);
       }
-      setStage("done");
+
+      setProgressStage(4);
+      stage4HideTimer = setTimeout(() => setProgressStage(0), 1500);
     } catch (err) {
-      clearTimeout(guideStageTimer);
-      setStage("idle");
+      clearTimeout(stage3Timer);
+      if (stage4HideTimer) clearTimeout(stage4HideTimer);
+      setProgressStage(0);
       setError(err instanceof Error ? err.message : "Unknown error.");
     }
   }
@@ -204,6 +237,10 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
     document.body.removeChild(a);
     URL.revokeObjectURL(dlUrl);
   }
+
+  const stageMessage =
+    progressStage > 0 ? STAGE_SETS[setKey][progressStage - 1] : "";
+  const showAnimatedDots = progressStage > 0 && progressStage < 4;
 
   return (
     <main className="min-h-screen bg-white text-gray-900">
@@ -261,6 +298,31 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
           </p>
         </div>
 
+        {progressStage > 0 && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="mb-4 bg-white border border-gray-200 rounded-lg p-4 sm:p-5 shadow-sm"
+          >
+            <p className="text-gray-900 font-medium text-base sm:text-lg flex flex-wrap items-baseline">
+              <span>{stageMessage}</span>
+              {showAnimatedDots && (
+                <span className="inline-flex ml-1" aria-hidden="true">
+                  <span className="animate-pulse">.</span>
+                  <span className="animate-pulse [animation-delay:200ms]">.</span>
+                  <span className="animate-pulse [animation-delay:400ms]">.</span>
+                </span>
+              )}
+            </p>
+            <div className="mt-3 h-2 w-full bg-amber-100 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-amber-500 transition-[width] duration-500 ease-out"
+                style={{ width: `${progressStage * 25}%` }}
+              />
+            </div>
+          </div>
+        )}
+
         <form onSubmit={onSubmit} className="space-y-3">
           <label htmlFor="url" className="block text-sm font-medium text-gray-700">
             YouTube URL
@@ -273,15 +335,15 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
               placeholder="https://www.youtube.com/watch?v=..."
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              disabled={atCap || submitting}
+              disabled={atCap || building}
               className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-600 focus:border-transparent disabled:bg-gray-50 disabled:text-gray-400"
             />
             <button
               type="submit"
-              disabled={atCap || submitting || url.trim().length === 0}
+              disabled={atCap || building || url.trim().length === 0}
               className="bg-green-600 text-white font-semibold px-6 py-3 rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition whitespace-nowrap"
             >
-              {submitting ? "Working..." : atCap ? "Cap reached" : "Build Guide"}
+              {building ? "Working..." : atCap ? "Cap reached" : "Build Guide"}
             </button>
           </div>
         </form>
@@ -298,21 +360,13 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
           </div>
         )}
 
-        {submitting && (
-          <div className="mt-8 bg-gray-50 border border-gray-200 rounded-lg p-6 text-center">
-            <div className="inline-block animate-spin h-6 w-6 border-2 border-green-600 border-t-transparent rounded-full mb-3" />
-            <p className="text-gray-700 font-medium">{STAGE_LABEL[stage]}</p>
-            <p className="text-xs text-gray-500 mt-1">This usually takes 30 to 90 seconds.</p>
-          </div>
-        )}
-
         {error && (
           <div className="mt-8 bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-800">
             {error}
           </div>
         )}
 
-        {guide && stage === "done" && (
+        {guide && progressStage === 0 && (
           <div className="mt-10">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-xl font-bold text-gray-900">Your guide</h3>
