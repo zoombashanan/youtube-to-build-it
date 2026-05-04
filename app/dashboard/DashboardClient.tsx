@@ -16,18 +16,22 @@ type SetKey = "A" | "B";
 
 const STAGE_SETS: Record<SetKey, readonly [string, string, string, string]> = {
   A: [
-    "Watching the video so you don't have to...",
-    "Pretending I understood it...",
-    "Making it sound smarter than it was...",
+    "Watching the video so you don't have to",
+    "Pretending I understood it",
+    "Making it sound smarter than it was",
     "Boom. You're welcome.",
   ],
   B: [
-    "Yanking the words out of the video...",
-    "Ignoring the part where they beg for likes...",
-    "Bribing the AI to focus...",
-    "Acting like I came up with it...",
+    "Yanking the words out of the video",
+    "Ignoring the part where they beg for likes",
+    "Bribing the AI to focus",
+    "Acting like I came up with it",
   ],
 };
+
+// Stage 1 must be visible long enough for users to actually read it,
+// even if the pre-flight meta call returns near-instantly.
+const STAGE_1_FLOOR_MS = 1500;
 
 const LAST_SET_KEY = "buildit_last_set";
 
@@ -155,17 +159,24 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
     setMeta(null);
     setPreflightMeta(null);
     setProgressStage(1);
+    const stage1Start = Date.now();
 
     const trimmed = url.trim();
 
     const pre = await preflightCheck(trimmed);
     if (!pre.ok) {
+      // Block path skips the floor so the error surfaces immediately.
       setProgressStage(0);
       setError(pre.message);
       return;
     }
     if (pre.soft) setSoftWarning(pre.soft);
     if (pre.meta) setPreflightMeta(pre.meta);
+
+    const elapsed = Date.now() - stage1Start;
+    if (elapsed < STAGE_1_FLOOR_MS) {
+      await new Promise((r) => setTimeout(r, STAGE_1_FLOOR_MS - elapsed));
+    }
 
     setProgressStage(2);
     // Per spec: 2s on Stage 2, then advance to Stage 3 (Claude phase).
