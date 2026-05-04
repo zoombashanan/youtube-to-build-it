@@ -18,6 +18,11 @@ export const maxDuration = 120; // seconds; covers transcript fetch + Anthropic 
 
 const Body = z.object({
   url: z.string().url(),
+  // Optional pre-flight meta (passed when the client successfully called
+  // /api/video-meta first). Lets us skip a second Supadata round-trip.
+  title: z.string().min(1).max(200).optional(),
+  channel: z.string().min(1).max(200).optional(),
+  durationSec: z.number().int().positive().max(86400).optional(),
 });
 
 export async function POST(request: Request) {
@@ -43,6 +48,14 @@ export async function POST(request: Request) {
   }
   const url = parsed.data.url;
   const debugMode = new URL(request.url).searchParams.get("debug") === "1";
+  const providedMeta =
+    parsed.data.title && parsed.data.channel
+      ? {
+          title: parsed.data.title,
+          channel: parsed.data.channel,
+          durationSec: parsed.data.durationSec ?? null,
+        }
+      : undefined;
 
   const admin = createAdminClient();
 
@@ -67,7 +80,10 @@ export async function POST(request: Request) {
   // 4. Fetch + clean transcript
   let transcript: Awaited<ReturnType<typeof fetchAndCleanTranscript>>;
   try {
-    transcript = await fetchAndCleanTranscript(url, { debug: debugMode });
+    transcript = await fetchAndCleanTranscript(url, {
+      debug: debugMode,
+      providedMeta,
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "";
     const debugInfo = debugMode

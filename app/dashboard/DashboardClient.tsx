@@ -19,7 +19,8 @@ const STAGE_LABEL: Record<Stage, string> = {
   done: "Done",
 };
 
-const MAX_DURATION_SEC = 900;
+const MAX_DURATION_SEC = 3600;
+const MAX_DURATION_LABEL = "60 minutes";
 
 function slug(s: string): string {
   return s
@@ -56,6 +57,9 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
   const [softWarning, setSoftWarning] = useState<string | null>(null);
   const [guide, setGuide] = useState<string | null>(null);
   const [meta, setMeta] = useState<{ title: string; channel: string } | null>(null);
+  const [preflightMeta, setPreflightMeta] = useState<
+    { title: string; channel: string; durationSec: number | null } | null
+  >(null);
 
   const remaining = Math.max(0, cap - used);
   const atCap = remaining <= 0;
@@ -63,9 +67,14 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
     stage === "checking" || stage === "transcript" || stage === "guide";
 
   async function preflightCheck(targetUrl: string): Promise<
-    | { ok: true; soft?: string }
+    | {
+        ok: true;
+        soft?: string;
+        meta?: { title: string; channel: string; durationSec: number | null };
+      }
     | { ok: false; message: string }
   > {
+    const softMsg = `Could not check video length. Build may fail if over ${MAX_DURATION_LABEL}.`;
     try {
       const res = await fetch("/api/video-meta", {
         method: "POST",
@@ -78,32 +87,36 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
         if (res.status === 400 || res.status === 401) {
           return { ok: false, message: json.error ?? "Invalid request." };
         }
-        return {
-          ok: true,
-          soft: "Could not check video length. Build may fail if over 15 min.",
-        };
+        return { ok: true, soft: softMsg };
       }
 
+      const title: string | undefined =
+        typeof json.title === "string" ? json.title : undefined;
+      const channel: string | undefined =
+        typeof json.channel === "string" ? json.channel : undefined;
       const dur: number | null =
         typeof json.durationSec === "number" ? json.durationSec : null;
+
       if (dur === null) {
-        return {
-          ok: true,
-          soft: "Could not check video length. Build may fail if over 15 min.",
-        };
+        // Have title/channel but no duration: still pass them through to
+        // skip the inline meta call.
+        const m =
+          title && channel ? { title, channel, durationSec: null } : undefined;
+        return { ok: true, soft: softMsg, meta: m };
       }
       if (dur > MAX_DURATION_SEC) {
         return {
           ok: false,
-          message: `This video is ${formatDuration(dur)}. Current max is 15 minutes. Try a shorter video.`,
+          message: `This video is ${formatDuration(dur)}. Current max is ${MAX_DURATION_LABEL}. Try a shorter video.`,
         };
       }
-      return { ok: true };
+      const m =
+        title && channel
+          ? { title, channel, durationSec: dur }
+          : undefined;
+      return { ok: true, meta: m };
     } catch {
-      return {
-        ok: true,
-        soft: "Could not check video length. Build may fail if over 15 min.",
-      };
+      return { ok: true, soft: softMsg };
     }
   }
 
@@ -115,6 +128,7 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
     setSoftWarning(null);
     setGuide(null);
     setMeta(null);
+    setPreflightMeta(null);
     setStage("checking");
 
     const trimmed = url.trim();
@@ -126,15 +140,29 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
       return;
     }
     if (pre.soft) setSoftWarning(pre.soft);
+    if (pre.meta) setPreflightMeta(pre.meta);
 
     setStage("transcript");
     const guideStageTimer = setTimeout(() => setStage("guide"), 1200);
 
     try {
+      const transcribeBody: {
+        url: string;
+        title?: string;
+        channel?: string;
+        durationSec?: number;
+      } = { url: trimmed };
+      if (pre.meta) {
+        transcribeBody.title = pre.meta.title;
+        transcribeBody.channel = pre.meta.channel;
+        if (pre.meta.durationSec !== null) {
+          transcribeBody.durationSec = pre.meta.durationSec;
+        }
+      }
       const res = await fetch("/api/transcribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: trimmed }),
+        body: JSON.stringify(transcribeBody),
       });
       clearTimeout(guideStageTimer);
 
@@ -229,7 +257,7 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
             />
           </svg>
           <p className="leading-snug">
-            Heads up: max video length is 15 minutes. Longer videos may time out.
+            Heads up: max video length is {MAX_DURATION_LABEL}. Longer videos may time out.
           </p>
         </div>
 

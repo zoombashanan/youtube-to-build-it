@@ -103,7 +103,10 @@ async function supadataGet<T>(
 
 export async function fetchAndCleanTranscript(
   url: string,
-  opts: { debug?: boolean } = {},
+  opts: {
+    debug?: boolean;
+    providedMeta?: { title: string; channel: string; durationSec?: number | null };
+  } = {},
 ): Promise<TranscriptResult> {
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error("INVALID_URL");
@@ -164,24 +167,38 @@ export async function fetchAndCleanTranscript(
   const wordCount = text.split(/\s+/).length;
   debug.finalWordCount = wordCount;
 
-  // Transcript succeeded — now fetch metadata for title + duration.
-  // If this fails, we still return a usable result (fallback title + wpm-based estimate).
-  const metaRes = await supadataGet<SupadataVideoMeta>(
-    "/youtube/video",
-    { id: videoId },
-    apiKey,
-  );
-  debug.videoMetaStatus = metaRes.status;
-
+  // Skip the second Supadata round-trip when the caller already fetched meta
+  // during a client-side pre-flight (saves 1 credit per successful build).
+  let title: string;
+  let channel: string;
   let estimatedMinutes: number;
-  if (metaRes.data?.duration && metaRes.data.duration > 0) {
-    estimatedMinutes = Math.max(1, Math.round(metaRes.data.duration / 60));
-  } else {
-    estimatedMinutes = Math.max(1, Math.round(wordCount / 150));
-  }
 
-  const title = metaRes.data?.title?.trim() || `YouTube video ${videoId}`;
-  const channel = extractChannelName(metaRes.data?.channel) || "youtube";
+  if (opts.providedMeta) {
+    title = opts.providedMeta.title.trim() || `YouTube video ${videoId}`;
+    channel = opts.providedMeta.channel.trim() || "youtube";
+    const dur = opts.providedMeta.durationSec;
+    estimatedMinutes =
+      typeof dur === "number" && dur > 0
+        ? Math.max(1, Math.round(dur / 60))
+        : Math.max(1, Math.round(wordCount / 150));
+  } else {
+    // Defensive fallback: pre-flight failed (soft-warn path), so fetch meta now.
+    const metaRes = await supadataGet<SupadataVideoMeta>(
+      "/youtube/video",
+      { id: videoId },
+      apiKey,
+    );
+    debug.videoMetaStatus = metaRes.status;
+
+    if (metaRes.data?.duration && metaRes.data.duration > 0) {
+      estimatedMinutes = Math.max(1, Math.round(metaRes.data.duration / 60));
+    } else {
+      estimatedMinutes = Math.max(1, Math.round(wordCount / 150));
+    }
+
+    title = metaRes.data?.title?.trim() || `YouTube video ${videoId}`;
+    channel = extractChannelName(metaRes.data?.channel) || "youtube";
+  }
 
   return {
     text,
