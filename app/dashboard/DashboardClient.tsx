@@ -78,12 +78,29 @@ function formatDuration(sec: number): string {
   return `${m}min ${s}sec`;
 }
 
+type ErrorState = { message: string; status: number };
+
+function errorBannerClasses(status: number): string {
+  // 503/502 -> service issue (amber). 429 -> rate limit (blue).
+  // 422/400 -> user action / input (yellow). 500 (and anything else) -> red.
+  if (status === 503 || status === 502) {
+    return "bg-amber-50 border-amber-200 text-amber-900";
+  }
+  if (status === 429) {
+    return "bg-blue-50 border-blue-200 text-blue-900";
+  }
+  if (status === 422 || status === 400) {
+    return "bg-yellow-50 border-yellow-200 text-yellow-900";
+  }
+  return "bg-red-50 border-red-200 text-red-800";
+}
+
 export default function DashboardClient({ email, initialUsed, cap }: Props) {
   const [used, setUsed] = useState(initialUsed);
   const [url, setUrl] = useState("");
   const [progressStage, setProgressStage] = useState<0 | 1 | 2 | 3 | 4>(0);
   const [setKey, setSetKey] = useState<SetKey>("A");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ErrorState | null>(null);
   const [softWarning, setSoftWarning] = useState<string | null>(null);
   const [guide, setGuide] = useState<string | null>(null);
   const [meta, setMeta] = useState<{ title: string; channel: string } | null>(null);
@@ -101,7 +118,7 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
         soft?: string;
         meta?: { title: string; channel: string; durationSec: number | null };
       }
-    | { ok: false; message: string }
+    | { ok: false; message: string; status: number }
   > {
     const softMsg = `Could not check video length. Build may fail if over ${MAX_DURATION_LABEL}.`;
     try {
@@ -114,7 +131,11 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
 
       if (!res.ok) {
         if (res.status === 400 || res.status === 401) {
-          return { ok: false, message: json.error ?? "Invalid request." };
+          return {
+            ok: false,
+            message: json.error ?? "Invalid request.",
+            status: res.status,
+          };
         }
         return { ok: true, soft: softMsg };
       }
@@ -135,6 +156,7 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
         return {
           ok: false,
           message: `This video is ${formatDuration(dur)}. Current max is ${MAX_DURATION_LABEL}. Try a shorter video.`,
+          status: 422,
         };
       }
       const m =
@@ -167,7 +189,7 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
     if (!pre.ok) {
       // Block path skips the floor so the error surfaces immediately.
       setProgressStage(0);
-      setError(pre.message);
+      setError({ message: pre.message, status: pre.status });
       return;
     }
     if (pre.soft) setSoftWarning(pre.soft);
@@ -213,7 +235,15 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
         if (res.status === 429) {
           setUsed(cap);
         }
-        throw new Error(json.error ?? "Something went wrong.");
+        setProgressStage(0);
+        setError({
+          message:
+            typeof json.error === "string"
+              ? json.error
+              : "Something went wrong. Please try again.",
+          status: res.status,
+        });
+        return;
       }
 
       setGuide(json.guide ?? "");
@@ -229,10 +259,18 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
       setProgressStage(4);
       stage4HideTimer = setTimeout(() => setProgressStage(0), 1500);
     } catch (err) {
+      // Network-level failure (fetch threw, JSON unparseable, etc.).
+      // Server-returned errors with a status are handled inline above.
       clearTimeout(stage3Timer);
       if (stage4HideTimer) clearTimeout(stage4HideTimer);
       setProgressStage(0);
-      setError(err instanceof Error ? err.message : "Unknown error.");
+      setError({
+        message:
+          err instanceof Error
+            ? err.message
+            : "Something went wrong. Please try again.",
+        status: 500,
+      });
     }
   }
 
@@ -372,8 +410,11 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
         )}
 
         {error && (
-          <div className="mt-8 bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-800">
-            {error}
+          <div
+            role="alert"
+            className={`mt-8 border rounded-lg p-4 text-sm ${errorBannerClasses(error.status)}`}
+          >
+            {error.message}
           </div>
         )}
 
