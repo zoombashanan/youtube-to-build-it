@@ -127,6 +127,8 @@ export async function POST(request: Request) {
 
   return NextResponse.json({
     guide: guideResult.guide,
+    title: transcript.title,
+    channel: transcript.channel,
     remaining: Math.max(0, DAILY_CAP - newCount),
   });
 }

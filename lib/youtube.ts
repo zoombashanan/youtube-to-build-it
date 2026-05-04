@@ -27,7 +27,14 @@ export type TranscriptResult = {
   text: string;
   estimatedMinutes: number;
   title: string;
+  channel: string;
   debug?: TranscriptDebug;
+};
+
+export type VideoMeta = {
+  title: string;
+  channel: string;
+  durationSec: number | null;
 };
 
 export type TranscriptDebug = {
@@ -53,7 +60,14 @@ type SupadataVideoMeta = {
   id: string;
   title?: string;
   duration?: number;
+  channel?: string | { name?: string; id?: string };
 };
+
+function extractChannelName(raw: SupadataVideoMeta["channel"]): string {
+  if (!raw) return "";
+  if (typeof raw === "string") return raw.trim();
+  return (raw.name ?? "").trim();
+}
 
 function getApiKey(): string {
   const key = process.env.SUPADATA_API_KEY;
@@ -167,11 +181,40 @@ export async function fetchAndCleanTranscript(
   }
 
   const title = metaRes.data?.title?.trim() || `YouTube video ${videoId}`;
+  const channel = extractChannelName(metaRes.data?.channel) || "youtube";
 
   return {
     text,
     estimatedMinutes,
     title,
+    channel,
     debug: opts.debug ? debug : undefined,
+  };
+}
+
+export async function fetchVideoMeta(url: string): Promise<VideoMeta> {
+  const videoId = extractVideoId(url);
+  if (!videoId) throw new Error("INVALID_URL");
+
+  const apiKey = getApiKey();
+  const metaRes = await supadataGet<SupadataVideoMeta>(
+    "/youtube/video",
+    { id: videoId },
+    apiKey,
+  );
+
+  if (metaRes.status === 401) throw new Error("SUPADATA_AUTH");
+  if (metaRes.status === 429) throw new Error("RATE_LIMIT");
+  if (metaRes.status !== 200 || !metaRes.data) {
+    throw new Error("META_UNAVAILABLE");
+  }
+
+  return {
+    title: metaRes.data.title?.trim() || `YouTube video ${videoId}`,
+    channel: extractChannelName(metaRes.data.channel) || "youtube",
+    durationSec:
+      typeof metaRes.data.duration === "number" && metaRes.data.duration > 0
+        ? metaRes.data.duration
+        : null,
   };
 }

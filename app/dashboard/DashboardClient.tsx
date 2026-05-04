@@ -9,42 +9,132 @@ type Props = {
   cap: number;
 };
 
-type Stage = "idle" | "transcript" | "guide" | "done";
+type Stage = "idle" | "checking" | "transcript" | "guide" | "done";
 
 const STAGE_LABEL: Record<Stage, string> = {
   idle: "",
+  checking: "Checking video length...",
   transcript: "Grabbing transcript...",
   guide: "Building guide...",
   done: "Done",
 };
+
+const MAX_DURATION_SEC = 900;
+
+function slug(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9_-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "");
+}
+
+function buildFilename(channel: string | null, title: string | null): string {
+  const ext = ".md";
+  const c = slug(channel || "youtube") || "youtube";
+  const t = slug(title || "untitled") || "untitled";
+  const maxTotal = 100;
+  const sep = "_";
+  const cTrim = c.slice(0, 30);
+  const remaining = maxTotal - ext.length - sep.length - cTrim.length;
+  const tTrim = t.slice(0, Math.max(1, remaining));
+  return `${cTrim}${sep}${tTrim}${ext}`;
+}
+
+function formatDuration(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}min ${s}sec`;
+}
 
 export default function DashboardClient({ email, initialUsed, cap }: Props) {
   const [used, setUsed] = useState(initialUsed);
   const [url, setUrl] = useState("");
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [softWarning, setSoftWarning] = useState<string | null>(null);
   const [guide, setGuide] = useState<string | null>(null);
+  const [meta, setMeta] = useState<{ title: string; channel: string } | null>(null);
 
   const remaining = Math.max(0, cap - used);
   const atCap = remaining <= 0;
-  const submitting = stage === "transcript" || stage === "guide";
+  const submitting =
+    stage === "checking" || stage === "transcript" || stage === "guide";
+
+  async function preflightCheck(targetUrl: string): Promise<
+    | { ok: true; soft?: string }
+    | { ok: false; message: string }
+  > {
+    try {
+      const res = await fetch("/api/video-meta", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: targetUrl }),
+      });
+      const json = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        if (res.status === 400 || res.status === 401) {
+          return { ok: false, message: json.error ?? "Invalid request." };
+        }
+        return {
+          ok: true,
+          soft: "Could not check video length. Build may fail if over 15 min.",
+        };
+      }
+
+      const dur: number | null =
+        typeof json.durationSec === "number" ? json.durationSec : null;
+      if (dur === null) {
+        return {
+          ok: true,
+          soft: "Could not check video length. Build may fail if over 15 min.",
+        };
+      }
+      if (dur > MAX_DURATION_SEC) {
+        return {
+          ok: false,
+          message: `This video is ${formatDuration(dur)}. Current max is 15 minutes. Try a shorter video.`,
+        };
+      }
+      return { ok: true };
+    } catch {
+      return {
+        ok: true,
+        soft: "Could not check video length. Build may fail if over 15 min.",
+      };
+    }
+  }
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (atCap || submitting || url.trim().length === 0) return;
 
     setError(null);
+    setSoftWarning(null);
     setGuide(null);
-    setStage("transcript");
+    setMeta(null);
+    setStage("checking");
 
-    // Brief artificial split between the two stages so the user sees both messages.
+    const trimmed = url.trim();
+
+    const pre = await preflightCheck(trimmed);
+    if (!pre.ok) {
+      setStage("idle");
+      setError(pre.message);
+      return;
+    }
+    if (pre.soft) setSoftWarning(pre.soft);
+
+    setStage("transcript");
     const guideStageTimer = setTimeout(() => setStage("guide"), 1200);
 
     try {
       const res = await fetch("/api/transcribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: url.trim() }),
+        body: JSON.stringify({ url: trimmed }),
       });
       clearTimeout(guideStageTimer);
 
@@ -58,6 +148,9 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
       }
 
       setGuide(json.guide ?? "");
+      if (typeof json.title === "string" && typeof json.channel === "string") {
+        setMeta({ title: json.title, channel: json.channel });
+      }
       if (typeof json.remaining === "number") {
         setUsed(cap - json.remaining);
       } else {
@@ -77,7 +170,7 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
     const dlUrl = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = dlUrl;
-    a.download = `build-it-${Date.now()}.md`;
+    a.download = buildFilename(meta?.channel ?? null, meta?.title ?? null);
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -118,6 +211,28 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
           </span>
         </div>
 
+        <div
+          role="note"
+          className="mb-4 flex items-start gap-3 bg-amber-50 border border-amber-200 text-amber-900 rounded-lg p-3 sm:p-4 text-sm"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 20 20"
+            fill="currentColor"
+            aria-hidden="true"
+            className="w-5 h-5 mt-0.5 flex-shrink-0"
+          >
+            <path
+              fillRule="evenodd"
+              d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 6a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 10 6zm0 9a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"
+              clipRule="evenodd"
+            />
+          </svg>
+          <p className="leading-snug">
+            Heads up: max video length is 15 minutes. Longer videos may time out.
+          </p>
+        </div>
+
         <form onSubmit={onSubmit} className="space-y-3">
           <label htmlFor="url" className="block text-sm font-medium text-gray-700">
             YouTube URL
@@ -147,6 +262,12 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
           <p className="mt-3 text-sm text-red-700">
             Daily limit reached. Try again tomorrow.
           </p>
+        )}
+
+        {softWarning && !error && (
+          <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-900">
+            {softWarning}
+          </div>
         )}
 
         {submitting && (
