@@ -100,8 +100,8 @@ export async function POST(request: Request) {
       const debugInfo = debugMode
         ? (e as Error & { debug?: unknown }).debug
         : undefined;
-      await logEvent(admin, "transcribe_error", user.id);
       const mapped = fromTranscriptError(e, videoId);
+      await logEvent(admin, mapped.eventType, user.id);
       console.error(`[transcribe] ${mapped.log}`);
       return NextResponse.json(
         { ...mapped.body, ...(debugInfo ? { _debug: debugInfo } : {}) },
@@ -123,8 +123,8 @@ export async function POST(request: Request) {
         capturedDate,
       });
     } catch (e) {
-      await logEvent(admin, "transcribe_error", user.id);
       const mapped = fromAnthropicError(e);
+      await logEvent(admin, mapped.eventType, user.id);
       console.error(`[transcribe] ${mapped.log}`);
       return NextResponse.json(mapped.body, { status: mapped.status });
     }

@@ -2,10 +2,23 @@
 // Tested in isolation by scripts/test-errors.mjs (mirrored logic).
 // Keeping these pure (no Next.js / Supabase imports) so they're easy to unit-test.
 
+// Categorical event_type values written to public.analytics. Schema column is
+// TEXT (no enum constraint), so this union is the source of truth.
+export type TranscribeErrorEventType =
+  | "transcribe_error_no_captions"
+  | "transcribe_error_supadata_rate_limit"
+  | "transcribe_error_supadata_auth"
+  | "transcribe_error_supadata_other"
+  | "transcribe_error_anthropic_billing"
+  | "transcribe_error_anthropic_rate_limit"
+  | "transcribe_error_anthropic_other"
+  | "transcribe_error_unhandled";
+
 export type TranscribeErrorResponse = {
   status: number;
   body: { error: string };
   log: string;
+  eventType: TranscribeErrorEventType;
 };
 
 // Anthropic SDK errors expose `.status` (number) and a parsed
@@ -33,6 +46,7 @@ export function fromAnthropicError(e: unknown): TranscribeErrorResponse {
       status: 502,
       body: { error: "AI service error. Please try again in a moment." },
       log: `Anthropic call failed without status: ${msg}`,
+      eventType: "transcribe_error_anthropic_other",
     };
   }
   const status = e.status;
@@ -45,6 +59,7 @@ export function fromAnthropicError(e: unknown): TranscribeErrorResponse {
         error: "Guide builder is temporarily offline. Please try again later.",
       },
       log: `Anthropic billing failure: ${inner}`,
+      eventType: "transcribe_error_anthropic_billing",
     };
   }
   if (status === 429) {
@@ -54,12 +69,14 @@ export function fromAnthropicError(e: unknown): TranscribeErrorResponse {
         error: "Too many requests right now. Wait 30 seconds and try again.",
       },
       log: "Anthropic rate limit hit",
+      eventType: "transcribe_error_anthropic_rate_limit",
     };
   }
   return {
     status: 502,
     body: { error: "AI service error. Please try again in a moment." },
     log: `Anthropic API error ${status}: ${inner}`,
+    eventType: "transcribe_error_anthropic_other",
   };
 }
 
@@ -76,6 +93,7 @@ export function fromTranscriptError(
         error: "This video has no captions. Try a video with subtitles enabled.",
       },
       log: `Transcript unavailable for video: ${videoId ?? "?"}`,
+      eventType: "transcribe_error_no_captions",
     };
   }
   if (msg === "RATE_LIMIT") {
@@ -85,6 +103,7 @@ export function fromTranscriptError(
         error: "Too many requests right now. Wait 30 seconds and try again.",
       },
       log: "Supadata rate limit hit",
+      eventType: "transcribe_error_supadata_rate_limit",
     };
   }
   if (msg === "SUPADATA_AUTH") {
@@ -94,12 +113,14 @@ export function fromTranscriptError(
         error: "Could not fetch the video transcript. Please try again.",
       },
       log: "Supadata auth failure - check SUPADATA_API_KEY",
+      eventType: "transcribe_error_supadata_auth",
     };
   }
   return {
     status: 502,
     body: { error: "Could not fetch the video transcript. Please try again." },
     log: `Supadata error: ${msg || "unknown"}`,
+    eventType: "transcribe_error_supadata_other",
   };
 }
 
@@ -109,5 +130,6 @@ export function unhandledTranscribeError(e: unknown): TranscribeErrorResponse {
     status: 500,
     body: { error: "Something went wrong. Please try again." },
     log: `Unhandled transcribe error: ${detail}`,
+    eventType: "transcribe_error_unhandled",
   };
 }
