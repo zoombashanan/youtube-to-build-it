@@ -5,16 +5,36 @@ export const DAILY_CAP = 10;
 
 type AdminClient = SupabaseClient<Database>;
 
-function todayUtcDate(): string {
-  // YYYY-MM-DD in UTC. Day boundary follows the server, not the client.
-  return new Date().toISOString().slice(0, 10);
+function todayInTimeZone(tz?: string): string {
+  // YYYY-MM-DD in the caller's IANA timezone. Falls back to UTC when tz is
+  // missing or invalid so the SSR badge render path (no client TZ available)
+  // stays functional.
+  const d = new Date();
+  if (!tz) return d.toISOString().slice(0, 10);
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(d);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+    const y = get("year");
+    const m = get("month");
+    const dd = get("day");
+    if (!y || !m || !dd) return d.toISOString().slice(0, 10);
+    return `${y}-${m}-${dd}`;
+  } catch {
+    return d.toISOString().slice(0, 10);
+  }
 }
 
 export async function getTodayCount(
   admin: AdminClient,
-  userId: string
+  userId: string,
+  tz?: string
 ): Promise<number> {
-  const date = todayUtcDate();
+  const date = todayInTimeZone(tz);
   const { data, error } = await admin
     .from("daily_usage")
     .select("count")
@@ -28,9 +48,10 @@ export async function getTodayCount(
 
 export async function incrementUsage(
   admin: AdminClient,
-  userId: string
+  userId: string,
+  tz?: string
 ): Promise<number> {
-  const date = todayUtcDate();
+  const date = todayInTimeZone(tz);
 
   // Try insert (count=1). If conflict, fetch + update.
   const { error: insertError } = await admin

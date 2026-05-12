@@ -214,6 +214,7 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
         title?: string;
         channel?: string;
         durationSec?: number;
+        timeZone?: string;
       } = { url: trimmed };
       if (pre.meta) {
         transcribeBody.title = pre.meta.title;
@@ -221,6 +222,12 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
         if (pre.meta.durationSec !== null) {
           transcribeBody.durationSec = pre.meta.durationSec;
         }
+      }
+      try {
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        if (tz) transcribeBody.timeZone = tz;
+      } catch {
+        // Intl unavailable or sandboxed: omit; server falls back to UTC.
       }
       const res = await fetch("/api/transcribe", {
         method: "POST",

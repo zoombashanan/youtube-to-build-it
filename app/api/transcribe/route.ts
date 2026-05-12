@@ -28,6 +28,9 @@ const Body = z.object({
   title: z.string().min(1).max(200).optional(),
   channel: z.string().min(1).max(200).optional(),
   durationSec: z.number().int().positive().max(86400).optional(),
+  // IANA timezone from the browser, used so the daily cap rolls over at the
+  // user's local midnight instead of UTC. Server falls back to UTC if absent.
+  timeZone: z.string().min(1).max(64).optional(),
 });
 
 export async function POST(request: Request) {
@@ -65,13 +68,14 @@ export async function POST(request: Request) {
             durationSec: parsed.data.durationSec ?? null,
           }
         : undefined;
+    const tz = parsed.data.timeZone;
 
     const admin = createAdminClient();
 
     // 3. Daily cap check (read-only). User row exists via auth-trigger.
     let count = 0;
     try {
-      count = await getTodayCount(admin, user.id);
+      count = await getTodayCount(admin, user.id, tz);
     } catch (e) {
       console.error("[transcribe] usage read failed:", e);
       return NextResponse.json(
@@ -132,7 +136,7 @@ export async function POST(request: Request) {
     // 6. Increment usage + log success (analytics is event-only, no URL/content)
     let newCount = count + 1;
     try {
-      newCount = await incrementUsage(admin, user.id);
+      newCount = await incrementUsage(admin, user.id, tz);
     } catch (e) {
       console.error("[transcribe] usage increment failed (guide already generated):", e);
     }
