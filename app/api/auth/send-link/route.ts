@@ -51,10 +51,11 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Could not generate sign-in link." }, { status: 500 });
     }
 
-    // Build a link that points DIRECTLY to our callback (skipping Supabase's
-    // auto-consume verify endpoint). This prevents email-scanner prefetch
-    // from burning the one-time token before the user clicks.
-    const customLink = `${appUrl}/api/auth/callback?token_hash=${encodeURIComponent(hashedToken)}&type=magiclink&next=${encodeURIComponent("/dashboard")}`;
+    // Point the magic link at a scanner-resistant interstitial page. The
+    // page renders a form that the USER must submit (POST) to consume the
+    // token. Corporate email scanners that GET links in incoming mail no
+    // longer burn the one-time token on prefetch.
+    const customLink = `${appUrl}/auth/confirm?token_hash=${encodeURIComponent(hashedToken)}&type=magiclink&next=${encodeURIComponent("/dashboard")}`;
 
     const { error: sendError } = await sendMagicLinkEmail(email, customLink);
     if (sendError) {
