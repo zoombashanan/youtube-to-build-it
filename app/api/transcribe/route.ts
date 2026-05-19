@@ -34,6 +34,11 @@ const Body = z.object({
 });
 
 export async function POST(request: Request) {
+  // Hoisted so both the handler body and the last-resort catch can reference them.
+  // createAdminClient() is synchronous and always safe to call at entry.
+  const admin = createAdminClient();
+  let userId: string | null = null;
+
   try {
     // 1. Auth
     const supabase = await createClient();
@@ -41,6 +46,7 @@ export async function POST(request: Request) {
     if (!user) {
       return NextResponse.json({ error: "Not signed in." }, { status: 401 });
     }
+    userId = user.id; // capture here so the outer catch can log it
 
     // 2. Validate URL
     const json = await request.json().catch(() => null);
@@ -69,8 +75,6 @@ export async function POST(request: Request) {
           }
         : undefined;
     const tz = parsed.data.timeZone;
-
-    const admin = createAdminClient();
 
     // 3. Daily cap check (read-only). User row exists via auth-trigger.
     let count = 0;
@@ -150,8 +154,10 @@ export async function POST(request: Request) {
     });
   } catch (e) {
     // Last-resort net for anything not caught above (auth client crash, etc.)
+    // admin is hoisted; userId may be null if auth itself crashed.
     const mapped = unhandledTranscribeError(e);
     console.error(`[transcribe] ${mapped.log}`);
+    await logEvent(admin, mapped.eventType, userId).catch(() => {});
     return NextResponse.json(mapped.body, { status: mapped.status });
   }
 }

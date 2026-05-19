@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useState, useEffect, type FormEvent } from "react";
 import ReactMarkdown from "react-markdown";
 
 type Props = {
@@ -107,6 +107,22 @@ export default function DashboardClient({ email, initialUsed, cap }: Props) {
   const [preflightMeta, setPreflightMeta] = useState<
     { title: string; channel: string; durationSec: number | null } | null
   >(null);
+
+  // On mount: write the user's IANA timezone to a cookie so the server-rendered
+  // cap badge can use local-time day boundaries on subsequent page loads.
+  useEffect(() => {
+    try {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (tz) {
+        document.cookie =
+          "user_tz=" +
+          encodeURIComponent(tz) +
+          "; path=/; SameSite=Lax; max-age=2592000";
+      }
+    } catch {
+      // Intl unavailable or sandboxed; no cookie; server stays on UTC.
+    }
+  }, []);
 
   const remaining = Math.max(0, cap - used);
   const atCap = remaining <= 0;
