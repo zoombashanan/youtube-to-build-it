@@ -8,6 +8,9 @@ const Body = z.object({
 });
 
 export async function POST(request: Request) {
+  // ?debug=1 returns the raw Supabase error for diagnosis. Remove after fix.
+  const debugMode = new URL(request.url).searchParams.get("debug") === "1";
+
   try {
     const json = await request.json().catch(() => null);
     const parsed = Body.safeParse(json);
@@ -48,6 +51,19 @@ export async function POST(request: Request) {
     const hashedToken = linkRes.data?.properties?.hashed_token;
     if (linkRes.error || !hashedToken) {
       console.error("[send-link] generateLink failed:", linkRes.error?.message);
+      if (debugMode) {
+        return NextResponse.json({
+          error: "Could not generate sign-in link.",
+          _debug: {
+            supabaseError: linkRes.error,
+            hashedTokenPresent: !!hashedToken,
+            dataKeys: linkRes.data ? Object.keys(linkRes.data) : null,
+            propertiesKeys: linkRes.data?.properties ? Object.keys(linkRes.data.properties) : null,
+            appUrl,
+            redirectTo,
+          },
+        }, { status: 500 });
+      }
       return NextResponse.json({ error: "Could not generate sign-in link." }, { status: 500 });
     }
 
@@ -66,6 +82,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true });
   } catch (err) {
     console.error("[send-link] unexpected:", err);
+    if (debugMode) {
+      return NextResponse.json({
+        error: "Server error.",
+        _debug: { message: err instanceof Error ? err.message : String(err) },
+      }, { status: 500 });
+    }
     return NextResponse.json({ error: "Server error." }, { status: 500 });
   }
 }
