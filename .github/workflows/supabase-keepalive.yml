@@ -1,0 +1,34 @@
+name: Supabase Keepalive
+
+# Supabase free tier pauses projects after 7 days of zero DB activity.
+# This workflow pings the REST API twice a week (Mon + Thu) to prevent that.
+# A non-200 response fails the workflow visibly in GitHub Actions — early
+# warning that something is wrong before friends hit the app.
+#
+# Required GitHub repo secrets:
+#   SUPABASE_URL      — value of NEXT_PUBLIC_SUPABASE_URL in Vercel env
+#   SUPABASE_ANON_KEY — value of NEXT_PUBLIC_SUPABASE_ANON_KEY in Vercel env
+
+on:
+  schedule:
+    - cron: "0 12 * * 1,4"  # Mon + Thu at 12:00 UTC (twice/week < 7-day threshold)
+  workflow_dispatch:          # manual trigger for testing
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Ping Supabase REST API
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
+            "${{ secrets.SUPABASE_URL }}/rest/v1/users?select=id&limit=1")
+          echo "HTTP status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "Unexpected status $STATUS — Supabase may be down or paused"
+            exit 1
+          fi
+          echo "Supabase is alive"
