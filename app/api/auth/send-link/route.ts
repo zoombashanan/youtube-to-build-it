@@ -19,19 +19,7 @@ export async function POST(request: Request) {
     const admin = createAdminClient();
 
     const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
     const redirectTo = `${appUrl}/api/auth/callback?next=/dashboard`;
-
-    // TEMP: ping Supabase health endpoint before auth call to confirm reachability
-    let pingStatus: number | string = "not attempted";
-    try {
-      const ping = await fetch(`${supabaseUrl}/auth/v1/health`, {
-        headers: { "apikey": process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "" },
-      });
-      pingStatus = ping.status;
-    } catch (e) {
-      pingStatus = `fetch error: ${e instanceof Error ? e.message : String(e)}`;
-    }
 
     // Try generating a magiclink first. If the user does not exist, create then retry.
     let linkRes = await admin.auth.admin.generateLink({
@@ -48,7 +36,7 @@ export async function POST(request: Request) {
       });
       if (created.error && !created.error.message.toLowerCase().includes("already")) {
         console.error("[send-link] createUser failed:", created.error.message);
-        return NextResponse.json({ error: "Could not create account.", _debug: { pingStatus, createUserError: created.error } }, { status: 500 });
+        return NextResponse.json({ error: "Could not create account." }, { status: 500 });
       }
       linkRes = await admin.auth.admin.generateLink({
         type: "magiclink",
@@ -60,18 +48,13 @@ export async function POST(request: Request) {
     const hashedToken = linkRes.data?.properties?.hashed_token;
     if (linkRes.error || !hashedToken) {
       console.error("[send-link] generateLink failed:", linkRes.error?.message);
-      // TEMP DEBUG
-      return NextResponse.json({
-        error: "Could not generate sign-in link.",
-        _debug: {
-          pingStatus,
-          supabaseError: linkRes.error,
-          hashedTokenPresent: !!hashedToken,
-          propertiesKeys: linkRes.data?.properties ? Object.keys(linkRes.data.properties) : null,
-        },
-      }, { status: 500 });
+      return NextResponse.json({ error: "Could not generate sign-in link." }, { status: 500 });
     }
 
+    // Point the magic link at a scanner-resistant interstitial page. The
+    // page renders a form that the USER must submit (POST) to consume the
+    // token. Corporate email scanners that GET links in incoming mail no
+    // longer burn the one-time token on prefetch.
     const customLink = `${appUrl}/auth/confirm?token_hash=${encodeURIComponent(hashedToken)}&type=magiclink&next=${encodeURIComponent("/dashboard")}`;
 
     const { error: sendError } = await sendMagicLinkEmail(email, customLink);
@@ -83,10 +66,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true });
   } catch (err) {
     console.error("[send-link] unexpected:", err);
-    // TEMP DEBUG
-    return NextResponse.json({
-      error: "Server error.",
-      _debug: { message: err instanceof Error ? err.message : String(err) },
-    }, { status: 500 });
+    return NextResponse.json({ error: "Server error." }, { status: 500 });
   }
 }
